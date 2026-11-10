@@ -1,6 +1,6 @@
 import { color } from "../core/design.ts";
 import { measureLoudness, readBundle, writeBundle, findAsset, owner, BUNDLE_MIME, type Project, type Loudness } from "../core/index.ts";
-import { RANGES, DEFAULT_SETTINGS, quantize, guessKey, noteName, type Note, type Settings } from "../engine/transcribe.ts";
+import { transcribe, RANGES, DEFAULT_SETTINGS, quantize, guessKey, noteName, type Note, type Settings } from "../engine/transcribe.ts";
 import { hzToMidi } from "../engine/pitch.ts";
 import { writeMidi, readMidi, PROGRAMS, MIDI_MIME } from "../engine/midi.ts";
 import { renderNotes, writeWav } from "../engine/audio.ts";
@@ -197,12 +197,11 @@ $("run").addEventListener("click", () => {
   if (!src?.pcm) return;
   stop();
   worker?.terminate();
-  worker = new TranscribeWorker();
+  const pcm = src.pcm, opts = settings();
   const progress = $<HTMLProgressElement>("progress"), status = $("status"), run = $<HTMLButtonElement>("run");
   progress.hidden = false; progress.value = 0; run.disabled = true; status.textContent = "Listening…";
   const started = performance.now();
-  worker.onmessage = (e: MessageEvent<Reply>) => {
-    const r = e.data;
+  const finish = (r: Reply) => {
     if (r.type === "progress") { progress.value = r.value; return; }
     progress.hidden = true; run.disabled = false; worker?.terminate(); worker = null;
     if (r.type === "error") { status.textContent = ""; showError(r.message); return; }
@@ -211,8 +210,22 @@ $("run").addEventListener("click", () => {
     showResult();
     $("result").scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  worker.onerror = (e) => { progress.hidden = true; run.disabled = false; showError(e.message || "Transcription failed."); };
-  worker.postMessage({ channels: src.pcm.channels.map((c) => c.slice()), rate: src.pcm.rate, settings: settings() });
+  // Some hosts (a page opened straight from a file, some in-app browsers) refuse
+  // background workers. Then transcribe on the page itself; it just can't show progress.
+  const inPage = () => {
+    worker?.terminate(); worker = null;
+    status.textContent = "Listening… (the page may pause until it's done)";
+    setTimeout(() => {
+      try {
+        const r = transcribe(pcm.channels, pcm.rate, opts);
+        finish({ type: "done", notes: r.notes, frames: r.frames.map(({ time, hz, clarity }) => ({ time, hz, clarity })) });
+      } catch (e) { finish({ type: "error", message: e instanceof Error ? e.message : String(e) }); }
+    }, 50);
+  };
+  try { worker = new TranscribeWorker(); } catch { return inPage(); }
+  worker.onmessage = (e: MessageEvent<Reply>) => finish(e.data);
+  worker.onerror = (e) => { e.preventDefault(); inPage(); };
+  worker.postMessage({ channels: pcm.channels.map((c) => c.slice()), rate: pcm.rate, settings: opts });
 });
 
 // ---------- notes, editing ----------
