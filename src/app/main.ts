@@ -568,3 +568,8 @@ function updateProjectHint() {
       ? `Adds a new MIDI version to “${state.project.project.title}”, based on the version you picked. Nothing existing is changed.`
       : "Creates a project with your recording and this transcription, ready for SoundLab CoLab.";
 }
+
+// Installable app: register the offline worker when served from a website
+// (GitHub Pages). Hosts that don't allow it (the claude.ai viewer) just skip it.
+if ("serviceWorker" in navigator && location.protocol === "https:" && !claudeHost)
+  navigator.serviceWorker.register("./sw.js").catch(() => { /* not allowed here */ });

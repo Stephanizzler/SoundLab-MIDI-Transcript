@@ -15,6 +15,15 @@ npm test         # engine and project tests (Node 22.6+)
 npm run build    # static site in dist/
 ```
 
+## Install it on your phone
+
+The app is published to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`, at `https://<user>.github.io/<repo>/`. It's an installable web app: it has a home-screen icon, opens full screen, and works offline after the first visit.
+
+- **iPhone (Safari):** open the link, tap **Share**, then **Add to Home Screen**.
+- **Android (Chrome):** open the link, tap **⋮**, then **Add to Home screen** (or **Install app**).
+
+One-time GitHub setup: in the repository, go to **Settings → Pages → Build and deployment** and set **Source** to **GitHub Actions**. GitHub Pages on a free plan needs a public repository.
+
 ## Decisions (START_HERE §4)
 
 | Decision | Choice | Why |

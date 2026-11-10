@@ -1,0 +1,15 @@
+{
+  "name": "SoundLab MIDI Transcript",
+  "short_name": "MIDI Transcript",
+  "description": "Turn a recorded melody, vocal, bass line or solo into an editable MIDI file.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0D0F12",
+  "theme_color": "#0D0F12",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
