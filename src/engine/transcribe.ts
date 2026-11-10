@@ -4,7 +4,8 @@
 // level jumps (a re-played note at the same pitch).
 import { trackPitch, hzToMidi, mixToMono, type PitchFrame } from "./pitch.ts";
 
-export type Note = { pitch: number; start: number; end: number; velocity: number };
+// `tune` is the note's sung pitch before rounding (MIDI, fractional), when known.
+export type Note = { pitch: number; start: number; end: number; velocity: number; tune?: number };
 
 export type Settings = {
   minHz: number;
@@ -13,9 +14,10 @@ export type Settings = {
   gateDb: number; // frames this far below the loudest frame are silence (negative)
   minNoteSeconds: number;
   attackDb: number; // a level jump this big starts a new note at the same pitch; 0 turns it off
+  stickiness: number; // semitones the pitch must move before a new note starts (0.3–1.5)
   hopSeconds: number;
 };
-export const DEFAULT_SETTINGS: Settings = { minHz: 50, maxHz: 2000, minClarity: 0.8, gateDb: -45, minNoteSeconds: 0.06, attackDb: 6, hopSeconds: 0.01 };
+export const DEFAULT_SETTINGS: Settings = { minHz: 50, maxHz: 2000, minClarity: 0.8, gateDb: -45, minNoteSeconds: 0.06, attackDb: 6, stickiness: 0.6, hopSeconds: 0.01 };
 
 // Pitch ranges for common sources. Narrower ranges avoid octave mistakes.
 export const RANGES: { id: string; name: string; minHz: number; maxHz: number }[] = [
@@ -77,14 +79,15 @@ export function framesToNotes(frames: PitchFrame[], s: Settings, level: number[]
   });
   const attack = rise.map((r, i) => !!s.attackDb && i > 0 && r >= s.attackDb && rise[i - 1] < s.attackDb);
 
-  // 1. Segments of steady pitch, with half a semitone of hysteresis.
+  // 1. Segments of steady pitch. Stickiness is the hysteresis: how far the pitch
+  //    must move from the current note before a new one starts.
   type Seg = { from: number; to: number; pitch: number };
   const segs: Seg[] = [];
   let cur: Seg | null = null;
   for (let i = 0; i < frames.length; i++) {
     if (!voiced[i]) { cur = null; continue; }
     const p = Math.round(midi[i]);
-    if (cur && cur.to === i - 1 && Math.abs(midi[i] - cur.pitch) <= 0.6 && !attack[i]) { cur.to = i; continue; }
+    if (cur && cur.to === i - 1 && Math.abs(midi[i] - cur.pitch) <= (s.stickiness ?? 0.6) && !attack[i]) { cur.to = i; continue; }
     cur = { from: i, to: i, pitch: p };
     segs.push(cur);
   }
@@ -118,9 +121,10 @@ export function framesToNotes(frames: PitchFrame[], s: Settings, level: number[]
   const top = Math.max(...peaks, -120);
   return segs
     .map((x, i) => {
-      const pitch = Math.round(median(midi.slice(x.from, x.to + 1)));
+      const tune = median(midi.slice(x.from, x.to + 1));
+      const pitch = Math.round(tune);
       const velocity = Math.max(1, Math.min(127, Math.round(127 + (peaks[i] - top) * 2.2)));
-      return { pitch, start: Math.max(0, frames[x.from].time - hop / 2), end: frames[x.to].time + hop / 2, velocity };
+      return { pitch, start: Math.max(0, frames[x.from].time - hop / 2), end: frames[x.to].time + hop / 2, velocity, tune: Math.round(tune * 100) / 100 };
     })
     .filter((n) => n.pitch >= 0 && n.pitch <= 127 && n.end - n.start >= s.minNoteSeconds * 0.99);
 }
@@ -139,28 +143,5 @@ export function quantize(notes: Note[], bpm: number, division: number, strength 
   });
 }
 
-// Most common pitch classes, as a rough key hint ("A minor / C major").
-const NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
+export const NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
 export const noteName = (p: number) => `${NAMES[((p % 12) + 12) % 12]}${Math.floor(p / 12) - 1}`;
-export function guessKey(notes: Note[]): string | null {
-  if (notes.length < 8) return null;
-  const weight = new Array(12).fill(0);
-  for (const n of notes) weight[n.pitch % 12] += n.end - n.start;
-  // Krumhansl–Kessler major profile, correlated against each tonic.
-  const major = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-  const minor = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
-  const corr = (profile: number[], tonic: number) => {
-    const xs = profile.map((_, i) => weight[(i + tonic) % 12]);
-    const mx = xs.reduce((a, b) => a + b) / 12, mp = profile.reduce((a, b) => a + b) / 12;
-    let num = 0, dx = 0, dp = 0;
-    for (let i = 0; i < 12; i++) { num += (xs[i] - mx) * (profile[i] - mp); dx += (xs[i] - mx) ** 2; dp += (profile[i] - mp) ** 2; }
-    return dx && dp ? num / Math.sqrt(dx * dp) : 0;
-  };
-  let best = { name: "", r: -Infinity };
-  for (let t = 0; t < 12; t++) {
-    const rM = corr(major, t), rm = corr(minor, t);
-    if (rM > best.r) best = { name: `${NAMES[t]} major`, r: rM };
-    if (rm > best.r) best = { name: `${NAMES[t]} minor`, r: rm };
-  }
-  return best.name;
-}

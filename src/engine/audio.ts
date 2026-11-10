@@ -80,3 +80,30 @@ export function renderNotes(notes: Note[], rate: number, seconds?: number): Floa
   if (peak > 0.89) for (let i = 0; i < length; i++) out[i] *= 0.89 / peak;
   return out;
 }
+
+// Simple synthesized drums for previewing drum notes (General MIDI numbers).
+export function renderDrums(notes: Note[], rate: number, seconds?: number): Float32Array {
+  const length = Math.ceil(rate * (seconds ?? Math.max(0, ...notes.map((n) => n.end)) + 0.5));
+  const out = new Float32Array(length);
+  let seed = 12345;
+  const noise = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  for (const n of notes) {
+    const from = Math.floor(n.start * rate), amp = 0.5 * (n.velocity / 127) ** 1.3, p = n.pitch;
+    const kind = p === 35 || p === 36 ? "kick" : [37, 38, 39, 40].includes(p) ? "snare" : [42, 44, 46, 49, 51, 52, 55, 57, 59].includes(p) ? "hat" : [41, 43, 45, 47, 48, 50].includes(p) ? "tom" : "click";
+    const dur = kind === "kick" ? 0.35 : kind === "snare" ? 0.2 : kind === "hat" ? (p === 46 || p >= 49 ? 0.4 : 0.06) : kind === "tom" ? 0.3 : 0.05;
+    let ph = 0, hp = 0, lastN = 0;
+    for (let i = 0; i < dur * rate && from + i < length; i++) {
+      const t = i / rate, env = Math.exp(-t / (dur / 4));
+      let v = 0;
+      if (kind === "kick") { ph += (2 * Math.PI * (50 + 90 * Math.exp(-t / 0.03))) / rate; v = Math.sin(ph); }
+      else if (kind === "tom") { ph += (2 * Math.PI * (80 + (p - 41) * 15) * (1 + 0.5 * Math.exp(-t / 0.05))) / rate; v = Math.sin(ph); }
+      else if (kind === "snare") { ph += (2 * Math.PI * 190) / rate; lastN += 0.35 * (noise() - lastN); v = 0.6 * Math.sin(ph) * Math.exp(-t / 0.04) + 1.2 * lastN; }
+      else { const nz = noise(); hp = 0.9 * (hp + nz - lastN); lastN = nz; v = kind === "hat" ? hp * 0.7 : Math.sin(2 * Math.PI * 1800 * t); }
+      out[from + i] += amp * env * v;
+    }
+  }
+  let peak = 0;
+  for (const x of out) peak = Math.max(peak, Math.abs(x));
+  if (peak > 0.89) for (let i = 0; i < length; i++) out[i] *= 0.89 / peak;
+  return out;
+}

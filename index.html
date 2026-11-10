@@ -19,7 +19,7 @@
 <header class="top">
   <div>
     <h1>SoundLab <span>MIDI Transcript</span></h1>
-    <p class="muted">Audio to MIDI for one line at a time: a melody, vocal, bass line or solo. Everything runs on this device; nothing is uploaded.</p>
+    <p class="muted">Turn a recorded melody, vocal, bass line, solo or beatbox into MIDI. Everything runs on this device; nothing is uploaded.</p>
   </div>
 </header>
 
@@ -31,7 +31,8 @@
       <p class="muted small">WAV, MP3, FLAC, M4A, OGG · MIDI · SoundLab project</p>
       <div class="row">
         <label class="button primary">Open file…<input type="file" id="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.mid,.midi,.soundlab" hidden /></label>
-        <button id="demo" class="button">Try a sample</button>
+        <button id="demo" class="button">Melody sample</button>
+        <button id="demoDrums" class="button">Beatbox sample</button>
       </div>
     </div>
     <div id="projectPick" class="row wrap" hidden>
@@ -49,30 +50,78 @@
       <label>What's playing
         <select id="range"></select>
       </label>
-      <label>Sensitivity <output id="clarityOut"></output>
+      <label class="only-melody">Stickiness <output id="stickOut"></output>
+        <input type="range" id="stick" min="0.3" max="1.5" step="0.05" value="0.6" />
+        <span class="hint">Higher holds one note through vibrato and scoops; lower follows quick runs.</span>
+      </label>
+      <label class="only-drums" hidden>Hit sensitivity <output id="drumSensOut"></output>
+        <input type="range" id="drumSens" min="0" max="1" step="0.05" value="0.5" />
+        <span class="hint">Higher finds quieter hits, but also more false ones.</span>
+      </label>
+      <label class="only-drums" hidden>Sound groups
+        <select id="drumGroups"><option value="0">Automatic</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select>
+        <span class="hint">How many different sounds you made (kick, snare, hat…).</span>
+      </label>
+      <label class="only-melody">Sensitivity <output id="clarityOut"></output>
         <input type="range" id="clarity" min="0.6" max="0.95" step="0.01" value="0.8" />
         <span class="hint">Lower finds breathy or distorted notes, but also more mistakes.</span>
       </label>
-      <label>Quietest note <output id="gateOut"></output>
+      <label class="only-melody">Quietest note <output id="gateOut"></output>
         <input type="range" id="gate" min="-70" max="-20" step="1" value="-45" />
         <span class="hint">Below this level (from the loudest moment) counts as silence.</span>
       </label>
-      <label>Shortest note <output id="minLenOut"></output>
+      <label class="only-melody">Shortest note <output id="minLenOut"></output>
         <input type="range" id="minLen" min="20" max="250" step="5" value="60" />
       </label>
-      <label class="check"><input type="checkbox" id="split" checked /> Split repeated notes at each new attack</label>
+      <label class="check only-melody"><input type="checkbox" id="split" checked /> Split repeated notes at each new attack</label>
     </div>
     <div class="row">
       <button id="run" class="button primary" disabled>Transcribe</button>
       <progress id="progress" max="1" value="0" hidden></progress>
       <span id="status" class="muted small" aria-live="polite"></span>
     </div>
-    <p class="muted small">Works best on a single instrument or voice playing one note at a time. Chords and full mixes are not transcribed reliably yet: split the part out first (SoundLab Stems).</p>
+    <p class="muted small only-melody">Works best on a single instrument or voice playing one note at a time. Chords and full mixes are not transcribed reliably yet: split the part out first (SoundLab Stems).</p>
+    <p class="muted small only-drums" hidden>Works on beatboxing or a drum recording. Similar sounds are grouped together, and you choose which drum each group plays.</p>
   </section>
 
   <section class="panel" id="result" hidden>
     <h2>3 · Notes</h2>
     <dl id="summary" class="readouts"></dl>
+    <div class="row wrap toolbar only-melody">
+      <label>Key <select id="tonic"></select></label>
+      <label><select id="scale" aria-label="Scale"></select></label>
+      <label class="check"><input type="checkbox" id="snap" /> Snap notes to the key</label>
+      <span class="muted small" id="snapInfo"></span>
+    </div>
+    <div class="parts only-melody" id="parts">
+      <div class="part">
+        <label class="check"><input type="checkbox" id="bend" /> Pitch bend</label>
+        <span class="hint">Keeps slides and vibrato as bends</span>
+        <label class="inline">Range <select id="bendRange"><option value="1">±1</option><option value="2" selected>±2</option><option value="12">±12</option></select></label>
+      </div>
+      <div class="part">
+        <label class="check"><input type="checkbox" id="chords" /> Chords</label>
+        <span class="hint" id="progression">Builds a chord on each melody note, in the key</span>
+        <div class="row wrap tight">
+          <select id="chordStyle" aria-label="Chord type"><option value="triads">Triads</option><option value="sevenths">Sevenths</option></select>
+          <select id="voicing" aria-label="Voicing"><option value="close">Close</option><option value="spread">Spread</option></select>
+          <select id="chordOct" aria-label="Chord octave"><option value="-1">Low</option><option value="0" selected>Middle</option><option value="1">High</option></select>
+        </div>
+      </div>
+      <div class="part">
+        <label class="check"><input type="checkbox" id="bass" /> Bass line</label>
+        <span class="hint">Root of each chord, an octave or two down</span>
+      </div>
+      <div class="part">
+        <label class="check"><input type="checkbox" id="ccLoud" /> Loudness → CC11</label>
+        <label class="check"><input type="checkbox" id="ccBright" /> Brightness → CC74</label>
+        <span class="hint">Follows how the recording swells and how bright it sounds</span>
+      </div>
+    </div>
+    <div class="only-drums" hidden>
+      <h3>Sounds found</h3>
+      <div id="groups" class="groups"></div>
+    </div>
     <div class="row wrap toolbar">
       <label>Tempo <input type="number" id="bpm" min="20" max="400" step="0.1" value="120" /> BPM</label>
       <label>Snap to grid
@@ -98,7 +147,7 @@
       <button class="button small" id="up" disabled title="Up a semitone (↑)">♯ Up</button>
       <button class="button small" id="del" disabled title="Delete (Del)">Delete</button>
       <button class="button small" id="undo" disabled>Undo</button>
-      <label class="check small"><input type="checkbox" id="showPitch" checked /> Show detected pitch</label>
+      <label class="check small only-melody"><input type="checkbox" id="showPitch" checked /> Show detected pitch</label>
     </div>
 
     <h3>Listen</h3>
@@ -116,8 +165,18 @@
 
     <h3>Export</h3>
     <div class="row wrap">
-      <label>Instrument <select id="program"></select></label>
-      <label>Track name <input type="text" id="trackName" maxlength="60" /></label>
+      <label>Song name <input type="text" id="trackName" maxlength="60" /></label>
+    </div>
+    <div class="tablewrap">
+      <table class="tracks">
+        <thead><tr><th>Part</th><th>Sound</th><th>MIDI channel</th></tr></thead>
+        <tbody>
+          <tr class="only-melody"><td>Melody</td><td><select id="program" aria-label="Melody sound"></select></td><td><input type="number" id="chMelody" min="1" max="16" value="1" aria-label="Melody channel" /></td></tr>
+          <tr id="rowChords" class="only-melody"><td>Chords</td><td><select id="progChords" aria-label="Chords sound"></select></td><td><input type="number" id="chChords" min="1" max="16" value="2" aria-label="Chords channel" /></td></tr>
+          <tr id="rowBass" class="only-melody"><td>Bass</td><td><select id="progBass" aria-label="Bass sound"></select></td><td><input type="number" id="chBass" min="1" max="16" value="3" aria-label="Bass channel" /></td></tr>
+          <tr class="only-drums" hidden><td>Drums</td><td>General MIDI drums</td><td><input type="number" id="chDrums" min="1" max="16" value="10" aria-label="Drums channel" /></td></tr>
+        </tbody>
+      </table>
     </div>
     <div class="row wrap">
       <button class="button primary" id="saveMidi">Download .mid</button>
@@ -126,7 +185,7 @@
     <p class="muted small" id="projectHint"></p>
   </section>
 </main>
-<footer class="muted small">SoundLab MIDI Transcript 0.1 · <span id="buildNote">Monophonic (one note at a time) transcription</span></footer>
+<footer class="muted small">SoundLab MIDI Transcript 0.2 · <span id="buildNote">Melodies one note at a time · beatbox and drums</span></footer>
 <script type="module" src="./src/app/main.ts"></script>
 </body>
 </html>

@@ -19,6 +19,12 @@ export type TranscribeRecord = {
   program: number;
   notes: number;
   edited: boolean; // notes were changed by hand after transcribing
+  // Added in 0.2; optional so records from 0.1 still read.
+  extras?: {
+    key?: { tonic: number | null; scale: string }; // tonic null = detected
+    snap?: boolean; bend?: boolean; chords?: boolean; bass?: boolean; chordStyle?: string; voicing?: string;
+    ccLoud?: boolean; ccBright?: boolean; drumNotes?: number[];
+  };
 };
 
 const audioMime = (name: string) =>

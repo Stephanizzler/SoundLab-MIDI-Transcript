@@ -1,7 +1,7 @@
 {
   "name": "soundlab-transcribe",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SoundLab MIDI Transcript: turn a recorded melody, vocal, bass line or solo into a MIDI file, in the browser.",
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "artifact": "vite build && node tools/artifact.mjs dist/artifact.html",
-    "test": "node tests/engine.test.mjs && node tests/project.test.mjs"
+    "test": "node tests/engine.test.mjs && node tests/parts.test.mjs && node tests/project.test.mjs"
   },
   "engines": { "node": ">=22.6" },
   "devDependencies": {

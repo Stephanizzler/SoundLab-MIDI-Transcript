@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { trackPitch, hzToMidi, midiToHz } from "../src/engine/pitch.ts";
-import { transcribe, quantize, guessKey, noteName } from "../src/engine/transcribe.ts";
+import { transcribe, quantize, noteName } from "../src/engine/transcribe.ts";
+import { guessKey } from "../src/engine/scale.ts";
 import { writeMidi, readMidi } from "../src/engine/midi.ts";
 import { readWav, writeWav, renderNotes } from "../src/engine/audio.ts";
 

@@ -78,3 +78,18 @@ footer { padding-top: 8px; padding-bottom: 32px; }
   .segmented { width: 100%; }
   .seg { flex: 1; padding: 8px 6px; }
 }
+
+.parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 12px 0; }
+.part { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-control); background: var(--raised); min-width: 0; }
+.part .hint { color: var(--muted); overflow-wrap: anywhere; }
+.part .tight { margin: 0; gap: 8px; }
+label.inline { flex-direction: row; align-items: center; gap: 8px; }
+.groups { display: grid; gap: 8px; }
+.group { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-control); background: var(--raised); }
+.group .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.group .what { flex: 1; min-width: 140px; }
+.tablewrap { overflow-x: auto; margin: 8px 0; }
+.tracks { border-collapse: collapse; min-width: 320px; }
+.tracks th { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); text-align: left; padding: 4px 12px 4px 0; }
+.tracks td { padding: 4px 12px 4px 0; }
+.tracks input[type="number"] { width: 64px; }

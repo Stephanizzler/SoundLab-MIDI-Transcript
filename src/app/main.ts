@@ -1,12 +1,15 @@
 import { color } from "../core/design.ts";
 import { measureLoudness, readBundle, writeBundle, findAsset, owner, BUNDLE_MIME, type Project, type Loudness } from "../core/index.ts";
-import { transcribe, RANGES, DEFAULT_SETTINGS, quantize, guessKey, noteName, type Note, type Settings } from "../engine/transcribe.ts";
+import { RANGES, DEFAULT_SETTINGS, quantize, noteName, NAMES, type Note, type Settings } from "../engine/transcribe.ts";
 import { hzToMidi } from "../engine/pitch.ts";
-import { writeMidi, readMidi, PROGRAMS, MIDI_MIME } from "../engine/midi.ts";
-import { renderNotes, writeWav } from "../engine/audio.ts";
+import { writeMidiTracks, readMidi, PROGRAMS, MIDI_MIME, type MidiTrack } from "../engine/midi.ts";
+import { renderNotes, renderDrums, writeWav } from "../engine/audio.ts";
+import { SCALES, detectKey, snapToKey, keyName, inKey, type Key } from "../engine/scale.ts";
+import { pitchBends, harmonize, chordNotes, bassNotes, expressionControls, type ExpressionFrame, type Chord } from "../engine/parts.ts";
+import { DRUM_NOTES, drumName, drumNotes, type DrumResult } from "../engine/drums.ts";
+import { analyse, type Reply, type Frame } from "./analyse.ts";
 import { projectFromAudio, saveTranscription, APP_ID, type TranscribeRecord } from "../engine/projectio.ts";
 import { openAudio, type Opened } from "./decode.ts";
-import type { Reply } from "./worker.ts";
 import TranscribeWorker from "./worker.ts?worker&inline";
 import { zipOne } from "./zipone.ts";
 
@@ -16,14 +19,17 @@ for (const [k, v] of Object.entries(color)) document.documentElement.style.setPr
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const clock = { now: () => new Date().toISOString(), id: () => crypto.randomUUID() };
 
-type Frame = { time: number; hz: number; clarity: number };
 type Loaded = { name: string; bytes: Uint8Array; pcm: Opened | null; loudness: Loudness | null };
 type ProjectState = { project: Project; files: Map<string, Uint8Array>; songId: string; versionId: string; fileName: string };
 
 const state = {
   source: null as Loaded | null,
   project: null as ProjectState | null,
+  kind: "melody" as "melody" | "drums",
   frames: [] as Frame[],
+  expression: [] as ExpressionFrame[],
+  drum: null as DrumResult | null,
+  detectedKey: null as (Key & { confidence: number }) | null,
   notes: [] as Note[],
   history: [] as Note[][],
   edited: false,
@@ -38,8 +44,21 @@ const state = {
 // ---------- settings ----------
 const rangeSel = $<HTMLSelectElement>("range");
 for (const r of RANGES) rangeSel.add(new Option(`${r.name} (${Math.round(r.minHz)}–${Math.round(r.maxHz)} Hz)`, r.id));
-const programSel = $<HTMLSelectElement>("program");
-for (const p of PROGRAMS) programSel.add(new Option(p.name, String(p.program)));
+rangeSel.add(new Option("Beatbox / drums", "drums"));
+const programSel = $<HTMLSelectElement>("program"), progChords = $<HTMLSelectElement>("progChords"), progBass = $<HTMLSelectElement>("progBass");
+for (const sel of [programSel, progChords, progBass]) for (const p of PROGRAMS) sel.add(new Option(p.name, String(p.program)));
+progChords.value = "89"; progBass.value = "33";
+const tonicSel = $<HTMLSelectElement>("tonic"), scaleSel = $<HTMLSelectElement>("scale");
+tonicSel.add(new Option("Detect", "auto"));
+NAMES.forEach((n, i) => tonicSel.add(new Option(n, String(i))));
+for (const [id, sc] of Object.entries(SCALES)) scaleSel.add(new Option(sc.name, id));
+const check = (id: string) => $<HTMLInputElement>(id).checked;
+const mode = (): "melody" | "drums" => (rangeSel.value === "drums" ? "drums" : "melody");
+function showMode(kind: "melody" | "drums") {
+  document.querySelectorAll<HTMLElement>(".only-melody").forEach((el) => (el.hidden = kind !== "melody"));
+  document.querySelectorAll<HTMLElement>(".only-drums").forEach((el) => (el.hidden = kind !== "drums"));
+}
+rangeSel.addEventListener("change", () => { if (!state.notes.length || $("result").hidden) showMode(mode()); });
 const bind = (id: string, out: string, fmt: (v: number) => string) => {
   const input = $<HTMLInputElement>(id), o = $<HTMLOutputElement>(out);
   const show = () => (o.value = fmt(Number(input.value)));
@@ -51,6 +70,8 @@ const clarity = bind("clarity", "clarityOut", (v) => `${Math.round(((0.95 - v) /
 const gate = bind("gate", "gateOut", (v) => `${v} dB`);
 const minLen = bind("minLen", "minLenOut", (v) => `${v} ms`);
 const strength = bind("strength", "strengthOut", (v) => `${Math.round(v * 100)}%`);
+const stick = bind("stick", "stickOut", (v) => `${v.toFixed(2)} semitones`);
+const drumSens = bind("drumSens", "drumSensOut", (v) => `${Math.round(v * 100)}%`);
 const splitBox = $<HTMLInputElement>("split");
 const bpmInput = $<HTMLInputElement>("bpm"), gridSel = $<HTMLSelectElement>("grid"), zoom = $<HTMLInputElement>("zoom");
 
@@ -58,17 +79,26 @@ function settings(): Partial<Settings> & { range: string } {
   const r = RANGES.find((x) => x.id === rangeSel.value) ?? RANGES[0];
   return {
     range: r.id, minHz: r.minHz, maxHz: r.maxHz, minClarity: Number(clarity.value), gateDb: Number(gate.value),
-    minNoteSeconds: Number(minLen.value) / 1000, attackDb: splitBox.checked ? DEFAULT_SETTINGS.attackDb : 0,
+    minNoteSeconds: Number(minLen.value) / 1000, attackDb: splitBox.checked ? DEFAULT_SETTINGS.attackDb : 0, stickiness: Number(stick.value),
   };
 }
 function restoreSettings(rec: Partial<TranscribeRecord> | undefined) {
   if (!rec) return;
-  if (rec.range && RANGES.some((r) => r.id === rec.range)) rangeSel.value = rec.range;
+  if (rec.range && [...rangeSel.options].some((o) => o.value === rec.range)) rangeSel.value = rec.range;
+  showMode(mode());
   const s = rec.settings ?? {};
   const set = (input: HTMLInputElement, v: unknown) => { if (typeof v === "number" && Number.isFinite(v)) { input.value = String(v); input.dispatchEvent(new Event("input")); } };
   set(clarity, s.minClarity); set(gate, s.gateDb);
   if (typeof s.minNoteSeconds === "number") set(minLen, Math.round(s.minNoteSeconds * 1000));
   if (typeof s.attackDb === "number") splitBox.checked = s.attackDb > 0;
+  set(stick, s.stickiness);
+  const x = rec.extras;
+  if (x) {
+    if (x.key) { tonicSel.value = x.key.tonic === null ? "auto" : String(x.key.tonic); if (SCALES[x.key.scale]) scaleSel.value = x.key.scale; }
+    for (const [id, v] of [["snap", x.snap], ["bend", x.bend], ["chords", x.chords], ["bass", x.bass], ["ccLoud", x.ccLoud], ["ccBright", x.ccBright]] as const) if (typeof v === "boolean") $<HTMLInputElement>(id).checked = v;
+    if (x.chordStyle) $<HTMLSelectElement>("chordStyle").value = x.chordStyle;
+    if (x.voicing) $<HTMLSelectElement>("voicing").value = x.voicing;
+  }
   if (rec.quantize) { gridSel.value = String(rec.quantize.division); set(strength, rec.quantize.strength); }
   if (typeof rec.program === "number") programSel.value = String(rec.program);
 }
@@ -99,7 +129,20 @@ $("demo").addEventListener("click", () => {
   let t = 0.25;
   const notes = tune.map((p, i) => { const n = { pitch: p, start: t, end: t + lens[i] * 0.3 - 0.04, velocity: 70 + ((i * 37) % 50) }; t += lens[i] * 0.3; return n; });
   const audio = renderNotes(notes, 48000);
+  if (rangeSel.value === "drums") rangeSel.value = "any";
   openFile("Sample melody.wav", new Blob([writeWav([audio], 48000, 24)]));
+});
+$("demoDrums").addEventListener("click", () => {
+  // Two bars of kick, snare and hi-hat at 100 BPM, made by the drum preview synth.
+  const step = 60 / 100 / 2, hits: Note[] = [];
+  for (let i = 0; i < 16; i++) {
+    const t = 0.2 + i * step, s = i % 8;
+    const pitch = s === 0 || s === 3 || s === 5 ? 36 : s === 2 || s === 6 ? 38 : 42;
+    hits.push({ pitch, start: t, end: t + 0.08, velocity: pitch === 42 ? 70 + ((i * 13) % 30) : 110 });
+  }
+  rangeSel.value = "drums";
+  bpmInput.value = "100";
+  openFile("Sample beatbox.wav", new Blob([writeWav([renderDrums(hits, 48000)], 48000, 24)]));
 });
 
 async function openFile(name: string, blob: Blob) {
@@ -123,7 +166,8 @@ async function loadAudio(name: string, bytes: Uint8Array) {
   let loudness: Loudness | null = null;
   try { loudness = measureLoudness(pcm.channels.slice(0, 2), pcm.rate); } catch { /* very short files */ }
   state.source = { name, bytes, pcm, loudness };
-  state.notes = []; state.frames = []; state.history = []; state.selected = -1; state.playhead = 0; state.edited = false; state.previewDirty = true;
+  state.notes = []; state.frames = []; state.expression = []; state.drum = null; state.history = []; state.selected = -1; state.playhead = 0; state.edited = false; state.previewDirty = true;
+  showMode(mode());
   readouts($("info"), [
     ["File", name],
     ["Sample rate", `${(pcm.rate / 1000).toLocaleString()} kHz`],
@@ -144,13 +188,18 @@ function openMidi(name: string, bytes: Uint8Array) {
   const song = readMidi(bytes);
   if (!song.notes.length) throw new Error("This MIDI file has no notes.");
   state.source = { name, bytes, pcm: null, loudness: null };
-  state.notes = song.notes; state.frames = []; state.history = []; state.selected = -1; state.playhead = 0; state.edited = false; state.previewDirty = true;
+  const first = song.tracks.find((t) => t.channel !== 9 && t.notes.length) ?? song.tracks[0];
+  const isDrums = first?.channel === 9;
+  state.kind = isDrums ? "drums" : "melody";
+  state.drum = null; state.expression = []; state.frames = [];
+  state.notes = first?.notes ?? song.notes; state.history = []; state.selected = -1; state.playhead = 0; state.edited = false; state.previewDirty = true;
+  showMode(state.kind);
   bpmInput.value = String(song.bpm);
   gridSel.value = "0";
   if (PROGRAMS.some((p) => p.program === song.program)) programSel.value = String(song.program);
   $<HTMLInputElement>("trackName").value = song.name || name.replace(/\.[^.]+$/, "");
   readouts($("info"), [["File", name], ["Notes", String(song.notes.length)], ["Tempo", `${song.bpm} BPM`]]);
-  showNote("MIDI file opened: you can edit the notes, change the instrument and export again. There is no recording to compare against.");
+  showNote(`MIDI file opened (${song.tracks.length > 1 ? `first of ${song.tracks.length} parts` : "one part"}): you can edit the notes, snap them to a key, add chords and a bass line, change the instrument and export again. There is no recording to compare against.`);
   $<HTMLButtonElement>("run").disabled = true;
   showResult();
 }
@@ -197,7 +246,8 @@ $("run").addEventListener("click", () => {
   if (!src?.pcm) return;
   stop();
   worker?.terminate();
-  const pcm = src.pcm, opts = settings();
+  const pcm = src.pcm, opts = settings(), kind = mode();
+  const job = { mode: kind, channels: pcm.channels, rate: pcm.rate, settings: opts, drums: { sensitivity: Number(drumSens.value), groups: Number($<HTMLSelectElement>("drumGroups").value) } };
   const progress = $<HTMLProgressElement>("progress"), status = $("status"), run = $<HTMLButtonElement>("run");
   progress.hidden = false; progress.value = 0; run.disabled = true; status.textContent = "Listening…";
   const started = performance.now();
@@ -205,33 +255,51 @@ $("run").addEventListener("click", () => {
     if (r.type === "progress") { progress.value = r.value; return; }
     progress.hidden = true; run.disabled = false; worker?.terminate(); worker = null;
     if (r.type === "error") { status.textContent = ""; showError(r.message); return; }
-    state.notes = r.notes; state.frames = r.frames; state.history = []; state.selected = -1; state.edited = false; state.previewDirty = true;
-    status.textContent = `${r.notes.length} notes in ${((performance.now() - started) / 1000).toFixed(1)} s`;
+    state.kind = r.mode; state.expression = r.expression; state.history = []; state.selected = -1; state.edited = false; state.previewDirty = true;
+    if (r.mode === "melody") { state.notes = r.notes; state.frames = r.frames; state.drum = null; }
+    else { state.drum = r.drums; state.frames = []; state.notes = drumNotes(r.drums); }
+    state.detectedKey = state.kind === "melody" ? detectKey(state.notes) : null;
+    const what = r.mode === "drums" ? `${state.notes.length} hits in ${state.drum!.groups.length} sound${state.drum!.groups.length === 1 ? "" : "s"}` : `${state.notes.length} notes`;
+    status.textContent = `${what} in ${((performance.now() - started) / 1000).toFixed(1)} s`;
+    showMode(state.kind);
     showResult();
     $("result").scrollIntoView({ behavior: "smooth", block: "start" });
   };
   // Some hosts (a page opened straight from a file, some in-app browsers) refuse
-  // background workers. Then transcribe on the page itself; it just can't show progress.
+  // background workers. Then analyse on the page itself; it just can't show progress.
   const inPage = () => {
     worker?.terminate(); worker = null;
     status.textContent = "Listening… (the page may pause until it's done)";
-    setTimeout(() => {
-      try {
-        const r = transcribe(pcm.channels, pcm.rate, opts);
-        finish({ type: "done", notes: r.notes, frames: r.frames.map(({ time, hz, clarity }) => ({ time, hz, clarity })) });
-      } catch (e) { finish({ type: "error", message: e instanceof Error ? e.message : String(e) }); }
-    }, 50);
+    setTimeout(() => { try { finish(analyse(job)); } catch (e) { finish({ type: "error", message: e instanceof Error ? e.message : String(e) }); } }, 50);
   };
   try { worker = new TranscribeWorker(); } catch { return inPage(); }
   worker.onmessage = (e: MessageEvent<Reply>) => finish(e.data);
   worker.onerror = (e) => { e.preventDefault(); inPage(); };
-  worker.postMessage({ channels: pcm.channels.map((c) => c.slice()), rate: pcm.rate, settings: opts });
+  worker.postMessage({ ...job, channels: pcm.channels.map((c) => c.slice()) });
 });
 
 // ---------- notes, editing ----------
 const division = () => Number(gridSel.value);
 const bpm = () => { const b = Number(bpmInput.value); return b >= 20 && b <= 400 ? b : 120; };
-const shown = (): Note[] => (division() > 0 ? quantize(state.notes, bpm(), division(), Number(strength.value)) : state.notes);
+// The key in use: the one chosen, or the detected one.
+function currentKey(): Key | null {
+  if (tonicSel.value !== "auto") return { tonic: Number(tonicSel.value), scale: scaleSel.value };
+  return state.detectedKey ? { tonic: state.detectedKey.tonic, scale: scaleSel.dataset.touched ? scaleSel.value : state.detectedKey.scale } : null;
+}
+scaleSel.addEventListener("change", () => (scaleSel.dataset.touched = "1"));
+const grid = (ns: Note[]) => (division() > 0 ? quantize(ns, bpm(), division(), Number(strength.value)) : ns);
+// The melody (or drum hits) as exported: snapped to the key, then to the grid.
+function shown(): Note[] {
+  const k = currentKey();
+  return grid(state.kind === "melody" && check("snap") && k ? snapToKey(state.notes, k) : state.notes);
+}
+type Parts = { lead: Note[]; chords: Chord[]; chordNotes: Note[]; bass: Note[] };
+function parts(): Parts {
+  const lead = shown(), k = currentKey();
+  if (state.kind !== "melody" || !k || !(check("chords") || check("bass"))) return { lead, chords: [], chordNotes: [], bass: [] };
+  const chords = harmonize(lead, k, { style: $<HTMLSelectElement>("chordStyle").value as "triads", voicing: $<HTMLSelectElement>("voicing").value as "close", octave: Number($<HTMLSelectElement>("chordOct").value), minSeconds: 0.2 });
+  return { lead, chords, chordNotes: check("chords") ? chordNotes(chords) : [], bass: check("bass") ? bassNotes(chords) : [] };
+}
 const duration = () => Math.max(state.source?.pcm ? state.source.pcm.channels[0].length / state.source.pcm.rate : 0, ...state.notes.map((n) => n.end + 0.5), 1);
 
 function showResult() {
@@ -243,14 +311,50 @@ function showResult() {
 }
 function summarize() {
   const n = state.notes;
+  if (state.kind === "drums") {
+    readouts($("summary"), [["Hits", String(n.length)], ["Sounds", String(state.drum?.groups.length ?? new Set(n.map((x) => x.pitch)).size)], ["Edited", state.edited ? "Yes" : "No"]]);
+    renderGroups();
+    if (!n.length) $("status").textContent = "No hits found. Try a higher hit sensitivity.";
+    return;
+  }
   const lo = Math.min(...n.map((x) => x.pitch)), hi = Math.max(...n.map((x) => x.pitch));
+  const k = currentKey(), d = state.detectedKey;
+  if (tonicSel.value === "auto") tonicSel.options[0].text = d ? `Detect (${NAMES[d.tonic]})` : "Detect";
+  if (tonicSel.value === "auto" && d && !scaleSel.dataset.touched) scaleSel.value = d.scale;
   readouts($("summary"), [
     ["Notes", String(n.length)],
     ["Range", n.length ? `${noteName(lo)}–${noteName(hi)}` : "—"],
-    ["Key hint", guessKey(n) ?? "—"],
+    ["Key", k ? keyName(k) : "Not enough notes"],
     ["Edited", state.edited ? "Yes" : "No"],
   ]);
+  const out = k ? n.filter((x) => !inKey(x.pitch, k)).length : 0;
+  $("snapInfo").textContent = !k ? "" : check("snap") ? `${out} note${out === 1 ? "" : "s"} moved into the key` : out ? `${out} note${out === 1 ? " is" : "s are"} outside the key` : "Every note is in the key";
+  const p = parts();
+  const names = p.chords.map((c) => c.name);
+  $("progression").textContent = !k ? "Needs a key: choose one, or transcribe at least 8 notes" : names.length ? names.slice(0, 16).join(" · ") + (names.length > 16 ? " …" : "") : "Builds a chord on each melody note, in the key";
+  $("rowChords").hidden = !check("chords"); $("rowBass").hidden = !check("bass");
   if (!n.length) $("status").textContent = "No notes found. Try a lower sensitivity setting, a lower quietest-note level or a different range.";
+}
+// Drum groups: what each found sound plays, with a button to hear one example.
+const GROUP_COLORS = [color.accent, color.compare, "#C792EA", "#7FD4C1"];
+function renderGroups() {
+  const box = $("groups"), d = state.drum;
+  if (!d) { box.replaceChildren(); return; }
+  box.replaceChildren(...d.groups.map((g) => {
+    const row = document.createElement("div");
+    row.className = "group";
+    const sw = document.createElement("span"); sw.className = "swatch"; sw.style.background = GROUP_COLORS[g.id % 4];
+    const what = document.createElement("span"); what.className = "what";
+    what.textContent = `Sound ${g.id + 1} · ${g.count} hit${g.count === 1 ? "" : "s"} · ${g.brightness < 400 ? "deep" : g.brightness < 6000 ? "mid" : "bright"}`;
+    const sel = document.createElement("select"); sel.setAttribute("aria-label", `Drum for sound ${g.id + 1}`);
+    for (const dn of DRUM_NOTES) sel.add(new Option(`${dn.name} (${dn.note})`, String(dn.note)));
+    sel.value = String(g.note);
+    sel.onchange = () => { g.note = Number(sel.value); edit(() => drumNotes(d)); };
+    const hear = document.createElement("button"); hear.className = "button small"; hear.textContent = "Hear";
+    hear.onclick = () => { const hit = d.hits.find((h) => h.group === g.id); if (hit) audition(hit.time); };
+    row.append(sw, what, sel, hear);
+    return row;
+  }));
 }
 function edit(fn: (notes: Note[]) => Note[]) {
   state.history.push(state.notes);
@@ -274,13 +378,14 @@ function updateEditButtons() {
   const sel = state.notes[state.selected];
   for (const id of ["up", "down", "del"]) $<HTMLButtonElement>(id).disabled = !sel;
   $<HTMLButtonElement>("undo").disabled = !state.history.length;
-  $("selection").textContent = sel ? `${noteName(sel.pitch)} · ${fmtTime(sel.start)} · ${Math.round((sel.end - sel.start) * 1000)} ms · velocity ${sel.velocity}` : "Click a note to select it. Click empty space to move the playhead.";
+  $("selection").textContent = sel ? `${state.kind === "drums" ? drumName(sel.pitch) : noteName(sel.pitch)} · ${fmtTime(sel.start)} · ${Math.round((sel.end - sel.start) * 1000)} ms · velocity ${sel.velocity}` : "Click a note to select it. Click empty space to move the playhead.";
 }
 $("up").addEventListener("click", () => moveSelected(1));
 $("down").addEventListener("click", () => moveSelected(-1));
 $("del").addEventListener("click", deleteSelected);
 $("undo").addEventListener("click", () => { const prev = state.history.pop(); if (prev) { state.notes = prev; state.selected = -1; state.previewDirty = true; showResult(); } });
-for (const el of [bpmInput, gridSel, strength, zoom, $("showPitch")]) el.addEventListener("input", () => { state.previewDirty = true; draw(); });
+for (const el of [bpmInput, gridSel, strength, zoom, $("showPitch"), tonicSel, scaleSel, ...["snap", "bend", "bendRange", "chords", "chordStyle", "voicing", "chordOct", "bass", "ccLoud", "ccBright"].map((id) => $(id))])
+  el.addEventListener("input", () => { state.previewDirty = true; if (!$("result").hidden) { summarize(); draw(); } });
 
 // ---------- piano roll ----------
 const roll = $("roll"), canvas = $<HTMLCanvasElement>("canvas"), spacer = $("rollSpacer");
@@ -306,7 +411,7 @@ function waveform() {
 
 function draw() {
   if ($("result").hidden) return;
-  const notes = shown();
+  const p = parts(), notes = p.lead, k = state.kind === "melody" ? currentKey() : null;
   const dpr = window.devicePixelRatio || 1;
   const w = roll.clientWidth, h = roll.clientHeight;
   const pps = Number(zoom.value);
@@ -314,7 +419,7 @@ function draw() {
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
   const g = canvas.getContext("2d")!;
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const ps = notes.map((n) => n.pitch);
+  const ps = [...notes, ...p.chordNotes, ...p.bass].map((n) => n.pitch);
   let lo = ps.length ? Math.min(...ps) - 3 : 48, hi = ps.length ? Math.max(...ps) + 3 : 84;
   while (hi - lo < 24) { lo--; hi++; }
   lo = Math.max(0, lo); hi = Math.min(127, hi);
@@ -327,7 +432,7 @@ function draw() {
 
   g.fillStyle = color.bg; g.fillRect(0, 0, w, h);
   for (let p = lo; p <= hi; p++) {
-    g.fillStyle = isBlack(p) ? "#101317" : color.bg;
+    g.fillStyle = k && inKey(p, k) ? "#141920" : isBlack(p) ? "#0B0D10" : color.bg;
     g.fillRect(KEYS, Y(p), w, row);
     if (p % 12 === 0) { g.fillStyle = color.line; g.fillRect(KEYS, Y(p) + row - 1, w, 1); }
   }
@@ -364,12 +469,25 @@ function draw() {
     }
     g.globalAlpha = 1;
   }
-  // Notes.
+  // Generated parts sit behind the melody: chords in blue, bass in grey.
+  const block = (ns: Note[], fill: string, alpha: number) => {
+    g.fillStyle = fill;
+    for (const n of ns) {
+      if (n.end < t0 || n.start > t1) continue;
+      g.globalAlpha = alpha;
+      g.fillRect(X(n.start), Y(n.pitch) + 1, Math.max(2, (n.end - n.start) * pps - 1), Math.max(2, row - 2));
+    }
+    g.globalAlpha = 1;
+  };
+  block(p.bass, color.muted, 0.6);
+  block(p.chordNotes, color.compare, 0.45);
+  // Notes (drum hits are coloured by the sound group they came from).
+  const groupOf = new Map(state.drum?.groups.map((gr) => [gr.note, gr.id]) ?? []);
   notes.forEach((n, i) => {
     if (n.end < t0 || n.start > t1) return;
     const x = X(n.start), y = Y(n.pitch), wd = Math.max(2, (n.end - n.start) * pps);
     g.globalAlpha = 0.45 + 0.55 * (n.velocity / 127);
-    g.fillStyle = color.accent;
+    g.fillStyle = state.kind === "drums" ? GROUP_COLORS[(groupOf.get(n.pitch) ?? 0) % 4] : color.accent;
     g.fillRect(x, y + 1, wd, Math.max(2, row - 2));
     g.globalAlpha = 1;
     if (i === state.selected) { g.strokeStyle = color.text; g.lineWidth = 2; g.strokeRect(x - 1, y, wd + 2, Math.max(3, row)); }
@@ -384,6 +502,10 @@ function draw() {
     g.fillStyle = isBlack(p) ? "#2a2f38" : "#c9ced6";
     g.fillRect(0, Y(p), KEYS - 2, row - (row > 4 ? 1 : 0));
     if (p % 12 === 0 && row >= 7) { g.fillStyle = "#15181d"; g.font = `${Math.min(11, row + 1)}px system-ui, sans-serif`; g.fillText(noteName(p), 3, Y(p) + row / 2); }
+  }
+  if (state.kind === "drums" && row >= 9) {
+    g.font = "11px system-ui, sans-serif";
+    for (const pitch of new Set(notes.map((n) => n.pitch))) { const label = drumName(pitch); g.fillStyle = "#0D0F12cc"; g.fillRect(KEYS + 2, Y(pitch), g.measureText(label).width + 8, row); g.fillStyle = color.text; g.fillText(label, KEYS + 6, Y(pitch) + row / 2); }
   }
   g.fillStyle = color.panel; g.fillRect(0, 0, KEYS, RULER);
   // Playhead.
@@ -432,7 +554,8 @@ function originalBuffer() {
 function previewBuffer() {
   if (state.previewDirty || !state.preview) {
     const rate = state.source?.pcm?.rate ?? 48000;
-    const audio = renderNotes(shown(), rate, duration());
+    const p = parts(), len = duration();
+    const audio = mixParts(p, rate, len);
     const b = audioCtx().createBuffer(1, audio.length, rate);
     b.copyToChannel(audio, 0);
     let lufs: number | null = null;
@@ -441,6 +564,24 @@ function previewBuffer() {
     state.previewDirty = false;
   }
   return state.preview;
+}
+function mixParts(p: Parts, rate: number, len: number) {
+  const tonal = state.kind === "drums" ? renderDrums(p.lead, rate, len) : renderNotes(p.lead, rate, len);
+  if (!p.chordNotes.length && !p.bass.length) return tonal;
+  const backing = renderNotes([...p.chordNotes.map((n) => ({ ...n, velocity: Math.round(n.velocity * 0.6) })), ...p.bass], rate, len);
+  const out = new Float32Array(Math.max(tonal.length, backing.length));
+  let peak = 0;
+  for (let i = 0; i < out.length; i++) { out[i] = (tonal[i] ?? 0) + 0.7 * (backing[i] ?? 0); peak = Math.max(peak, Math.abs(out[i])); }
+  if (peak > 0.89) for (let i = 0; i < out.length; i++) out[i] *= 0.89 / peak;
+  return out;
+}
+// Plays half a second of the original from a moment (to hear a drum group).
+function audition(at: number) {
+  const b = originalBuffer();
+  if (!b) return;
+  stop();
+  const c = audioCtx(); c.resume();
+  const s = c.createBufferSource(); s.buffer = b; s.connect(c.destination); s.start(0, Math.max(0, at - 0.02), 0.5);
 }
 function seek(t: number) {
   const was = !!state.playing;
@@ -525,11 +666,35 @@ async function download(name: string, bytes: Uint8Array, type: string) {
 const trackName = () => ($<HTMLInputElement>("trackName").value.trim() || "Transcription").slice(0, 60);
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, "").trim() || "Transcription";
 function midiBytes() {
-  return writeMidi({ notes: shown(), bpm: bpm(), program: Number(programSel.value), name: trackName() });
+  const p = parts(), k = currentKey();
+  const ch = (id: string) => Math.max(1, Math.min(16, Math.round(Number($<HTMLInputElement>(id).value) || 1))) - 1;
+  const tracks: MidiTrack[] = [];
+  if (state.kind === "drums") tracks.push({ name: "Drums", channel: ch("chDrums"), notes: p.lead });
+  else {
+    const range = Number($<HTMLSelectElement>("bendRange").value);
+    const minClarity = Number(clarity.value);
+    tracks.push({
+      name: trackName(), channel: ch("chMelody"), program: Number(programSel.value), notes: p.lead,
+      bends: check("bend") && state.frames.length ? pitchBends(p.lead, state.frames, { range, minClarity }) : undefined, bendRange: range,
+      controls: check("ccLoud") || check("ccBright") ? expressionControls(state.expression, { loudness: check("ccLoud"), brightness: check("ccBright") }) : undefined,
+    });
+    if (p.chordNotes.length) tracks.push({ name: `Chords${k ? ` (${keyName(k)})` : ""}`, channel: ch("chChords"), program: Number(progChords.value), notes: p.chordNotes });
+    if (p.bass.length) tracks.push({ name: "Bass", channel: ch("chBass"), program: Number(progBass.value), notes: p.bass });
+  }
+  return writeMidiTracks({ bpm: bpm(), name: trackName(), tracks });
 }
 function record(): TranscribeRecord {
   const { range, ...s } = settings();
-  return { range, settings: s as Record<string, number>, bpm: bpm(), quantize: { division: division(), strength: Number(strength.value) }, program: Number(programSel.value), notes: state.notes.length, edited: state.edited };
+  const k = currentKey();
+  return {
+    range: state.kind === "drums" ? "drums" : range, settings: s as Record<string, number>, bpm: bpm(), quantize: { division: division(), strength: Number(strength.value) },
+    program: Number(programSel.value), notes: state.notes.length, edited: state.edited,
+    extras: {
+      key: k ? { tonic: tonicSel.value === "auto" ? null : k.tonic, scale: k.scale } : undefined, snap: check("snap"), bend: check("bend"), chords: check("chords"), bass: check("bass"),
+      chordStyle: $<HTMLSelectElement>("chordStyle").value, voicing: $<HTMLSelectElement>("voicing").value, ccLoud: check("ccLoud"), ccBright: check("ccBright"),
+      drumNotes: state.drum?.groups.map((g) => g.note),
+    },
+  };
 }
 $("saveMidi").addEventListener("click", () => {
   showError(null);
@@ -550,7 +715,7 @@ $("saveProject").addEventListener("click", () => {
       const r = projectFromAudio(clock, { title, ownerName: "Owner", fileName: src.name, bytes: src.bytes, pcm: src.pcm });
       ps = { project: r.project, files: r.files, songId: r.songId, versionId: r.versionId, fileName: `${safeName(title)}.soundlab` };
     }
-    const preview = renderNotes(shown(), src.pcm.rate, duration());
+    const preview = mixParts(parts(), src.pcm.rate, duration());
     const saved = saveTranscription(ps.project, ps.files, clock, {
       basedOn: ps.versionId, memberId: owner(ps.project).id, midi: midiBytes(), preview, rate: src.pcm.rate, record: record(),
     });
