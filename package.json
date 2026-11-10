@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "artifact": "vite build && node tools/artifact.mjs dist/artifact.html",
     "test": "node tests/engine.test.mjs && node tests/project.test.mjs"
   },
   "engines": { "node": ">=22.6" },

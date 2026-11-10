@@ -7,6 +7,8 @@ import { renderNotes, writeWav } from "../engine/audio.ts";
 import { projectFromAudio, saveTranscription, APP_ID, type TranscribeRecord } from "../engine/projectio.ts";
 import { openAudio, type Opened } from "./decode.ts";
 import type { Reply } from "./worker.ts";
+import TranscribeWorker from "./worker.ts?worker&inline";
+import { zipOne } from "./zipone.ts";
 
 // Design tokens -> CSS variables, so the page matches the other Pro apps.
 for (const [k, v] of Object.entries(color)) document.documentElement.style.setProperty(`--${k}`, v);
@@ -195,7 +197,7 @@ $("run").addEventListener("click", () => {
   if (!src?.pcm) return;
   stop();
   worker?.terminate();
-  worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+  worker = new TranscribeWorker();
   const progress = $<HTMLProgressElement>("progress"), status = $("status"), run = $<HTMLButtonElement>("run");
   progress.hidden = false; progress.value = 0; run.disabled = true; status.textContent = "Listening…";
   const started = performance.now();
@@ -486,7 +488,22 @@ for (const b of document.querySelectorAll<HTMLButtonElement>(".seg")) {
 $("match").addEventListener("change", () => { if (state.playing) { stop(); start(); } });
 
 // ---------- export ----------
-function download(name: string, bytes: Uint8Array, type: string) {
+type Downloads = { save: (r: { filename: string; data: Uint8Array }) => Promise<unknown> };
+const claudeHost = (window as unknown as { claude?: { use: (n: string) => Promise<unknown> } }).claude;
+const downloadsReady: Promise<Downloads | null> = claudeHost ? claudeHost.use("downloads").then((d) => d as Downloads | null, () => null) : Promise.resolve(null);
+async function download(name: string, bytes: Uint8Array, type: string) {
+  const host = await downloadsReady;
+  if (host) {
+    // The claude.ai viewer only saves certain file types, so the file comes inside a .zip.
+    try {
+      await host.save({ filename: `${name}.zip`, data: zipOne(name, bytes) });
+      $("projectHint").textContent = `Saved ${name}.zip. Unzip it to get ${name}.`;
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code !== "declined") showError(code === "rate_limited" ? "A save is already waiting for your answer." : "Saving files isn't available in this view.");
+    }
+    return;
+  }
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = Object.assign(document.createElement("a"), { href: url, download: name });
   document.body.append(a); a.click(); a.remove();
@@ -525,8 +542,8 @@ $("saveProject").addEventListener("click", () => {
       basedOn: ps.versionId, memberId: owner(ps.project).id, midi: midiBytes(), preview, rate: src.pcm.rate, record: record(),
     });
     state.project = { ...ps, project: saved.project, files: saved.files };
-    download(ps.fileName.endsWith(".soundlab") ? ps.fileName : `${ps.fileName}.soundlab`, writeBundle(saved.project, saved.files), BUNDLE_MIME);
     $("projectHint").textContent = `Saved as ${saved.version.label}, based on the version you transcribed. Your original is unchanged.`;
+    download(ps.fileName.endsWith(".soundlab") ? ps.fileName : `${ps.fileName}.soundlab`, writeBundle(saved.project, saved.files), BUNDLE_MIME);
   } catch (e) { showError(e); }
 });
 function updateProjectHint() {
