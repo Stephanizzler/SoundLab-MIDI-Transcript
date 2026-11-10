@@ -17,12 +17,12 @@ npm run build    # static site in dist/
 
 ## Install it on your phone
 
-The app is published to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`, at `https://<user>.github.io/<repo>/`. It's an installable web app: it has a home-screen icon, opens full screen, and works offline after the first visit.
+The app is published to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`: it tests and builds the app, then pushes `dist/` to the `gh-pages` branch. It's live at **https://stephanizzler.github.io/SoundLab-MIDI-Transcript/**. It's an installable web app: it has a home-screen icon, opens full screen, and works offline after the first visit.
 
 - **iPhone (Safari):** open the link, tap **Share**, then **Add to Home Screen**.
 - **Android (Chrome):** open the link, tap **⋮**, then **Add to Home screen** (or **Install app**).
 
-One-time GitHub setup: in the repository, go to **Settings → Pages → Build and deployment** and set **Source** to **GitHub Actions**. GitHub Pages on a free plan needs a public repository.
+Pages serves the `gh-pages` branch (Settings → Pages → Deploy from a branch). GitHub Pages on a free plan needs a public repository.
 
 ## Decisions (START_HERE §4)
 
